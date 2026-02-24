@@ -9,6 +9,65 @@ By strictly decoupling Working Memory (Self-Attention) from Long-Term Factual Me
 
 ---
 
+## 🧮 Mathematical Formulation
+
+Unlike standard Dense Transformers that compute $O(d_{model} \times d_{ffn})$ operations per token, SparseMind utilizes a strictly decoupled routing mechanism.
+
+**1. The Information Bottleneck:**
+To prevent the model from hiding factual data in the residual stream, the hidden state $h_t$ is compressed into a low-dimensional reasoning pointer $p_t$:
+$$ p_t = h_t W_{comp} $$
+*(Where $W_{comp} \in \mathbb{R}^{d_{model} \times d_{reason}}$, and $d_{reason} \ll d_{model}$)*
+
+**2. Key-Query Matching:**
+The pointer calculates cosine similarity against the global factual Key matrix $K$:
+$$ s_{t} = \frac{p_t K^T}{\sqrt{d_{reason}}} $$
+
+**3. Ultra-Sparse Top-K Masking:**
+To achieve 99.9% sparsity, we apply a hard routing mask, keeping only the top $k$ scores and setting the rest to $-\infty$:
+$$ M_{t, i} = \begin{cases} s_{t, i} & \text{if } s_{t, i} \in \text{TopK}(s_t) \\ -\infty & \text{otherwise} \end{cases} $$
+$$ w_t = \text{Softmax}(M_t) $$
+
+**4. High-Speed Hardware Gather (Value Retrieval):**
+Rather than performing a dense matrix multiplication with zeros, the model physically gathers only the $k$ activated memory values $V$:
+$$ \text{FFN}_{out} = \sum_{i \in \text{TopK}} w_{t, i} V_i $$
+
+**5. Entropy Regularization:**
+To prevent routing collapse and force the model to commit to specific memory slots, we apply an entropy penalty during training:
+$$ \mathcal{L}_{entropy} = - \sum_{i \in \text{TopK}} w_{t, i} \log(w_{t, i} + \epsilon) $$
+
+## 📐 Architecture Diagram: Dense FFN vs. SparseMind
+
+```mermaid
+graph TD
+    subgraph Standard Dense Transformer
+        A1[Hidden State: 512D] --> B1[Dense Linear 1: 512 x 16384]
+        B1 --> C1[GELU Activation]
+        C1 --> D1[Dense Linear 2: 16384 x 512]
+        D1 --> E1[Output State]
+        style B1 fill:#ff9999,stroke:#333,stroke-width:2px
+        style D1 fill:#ff9999,stroke:#333,stroke-width:2px
+    end
+
+    subgraph SparseMind Architecture (Ours)
+        A2[Hidden State: 512D] --> B2[Information Bottleneck: 16D]
+        B2 --> C2{Top-K Router}
+        
+        C2 -.->|Score: 0.0| S1[Slot 1: Null]
+        C2 -.->|Score: 0.0| S2[Slot 2: Null]
+        C2 ==>|Score: 0.9| S3[Slot 842: Active]
+        C2 ==>|Score: 0.1| S4[Slot 5991: Active]
+        C2 -.->|Score: 0.0| S5[Slot N: Null]
+        
+        S3 ==> E2[Value Gather & Sum]
+        S4 ==> E2
+        E2 --> F2[Output State]
+        
+        style B2 fill:#99ccff,stroke:#333,stroke-width:2px
+        style C2 fill:#99ff99,stroke:#333,stroke-width:2px
+        style S3 fill:#ffff99,stroke:#333,stroke-width:2px
+        style S4 fill:#ffff99,stroke:#333,stroke-width:2px
+    end
+
 ## 🏗️ 1. The SparseMind Architecture Code (`model.py`)
 This is the core architecture. It includes the 16-dimensional Information Bottleneck (to force strict decoupling) and the High-Speed Hardware Gather (to physically bypass the $O(N)$ dense matrix multiplication).
 
